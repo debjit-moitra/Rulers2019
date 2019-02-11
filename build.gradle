@@ -1,0 +1,520 @@
+import Scripts.PasswordEncryption
+import com.siemens.soarian.build.Listeners.SnapshotListener
+import com.siemens.soarian.build.Plugins.AccuRev.AccurevPlugin
+import com.siemens.soarian.build.Plugins.LabelMaker.LabelMakerPlugin
+import com.cerner.soarian.build.Listeners.CollectBuildStats
+import groovyx.net.http.RESTClient
+import static groovyx.net.http.ContentType.*
+
+
+buildscript {
+    repositories {
+        sfRelease()
+    }
+    configurations.all {
+        resolutionStrategy.cacheChangingModulesFor 0, 'seconds'
+    }
+    dependencies {
+        classpath "com.siemens.soarian.sf:Build_Source:BDSRC_01.03.+"
+        classpath "com.siemens.soarian.sf:soarian-groovy-utils:SGUTL_01.02.+"
+        classpath 'commons-lang:commons-lang:2.3'
+        classpath "commons-httpclient:commons-httpclient:3.1"
+        classpath "commons-codec:commons-codec:1.3"
+		classpath "org.codehaus.groovy.modules.http-builder:http-builder:0.7"
+		classpath "commons-collections:commons-collections:3.2.1"
+    }
+}
+
+
+gradle.addBuildListener(new CollectBuildStats())
+
+apply from: "$rootDir/repositories.gradle"
+
+ext.buildLabel = ""
+ext.defaultLabel = "SRNPR_00.00.0000"
+ext.label = System.properties['label'] ?: defaultLabel
+//TODO: Remove the following property after fixing snapshotListener
+ext.clearcaseRoot=rootDir
+ext.buildHistoryURL = System.properties["WEBSVC_URL"] ?: "http://usmlvv1sf2378:8080/buildReports"
+
+apply plugin: LabelMakerPlugin
+
+ext.client = new RESTClient( buildHistoryURL+'/')
+ext.SRNPRbuildLabel=client.post(
+	path: 'build/getLatestPromotedBuildLabel',
+	body: [ buildLabel: 'SRNPR_00.00.0000' ],
+	requestContentType: URLENC
+).getData().buildLabel
+
+ext.ClaimsbuildLabel=client.post(
+	path: 'build/getLatestPromotedBuildLabel',
+	body: [ buildLabel: 'CLAIM_05.05.0000' ],
+	requestContentType: URLENC
+).getData().buildLabel
+
+ext.claimsLabelVersion=project.claimsLabel ?: ClaimsbuildLabel
+ext.claimsArtifactId=''
+ext.claimsOldRelease=0
+ext.claimsUpliftArtifactId='Claims_Uplift_Media_Tomcat'
+
+if(project.claimsLabel=~/\w{5}_\d{2}.\d{2}.1111_C/){
+    claimsArtifactId='CLAIM_Media'
+    claimsOldRelease=1
+    println "*****  CLAIMS ARTIFACTORY VERSION: $claimsLabelVersion *****"
+} else {
+    claimsArtifactId='Claims_Media_Tomcat'
+	println "*****  CLAIMS ARTIFACTORY VERSION: $claimsLabelVersion *****"
+}
+
+configurations{
+    scdsLibs
+    scdsZips
+    claimZips
+    claimEars
+    claimsArtifacts
+    claimsUpliftArtifacts
+}
+
+dependencies {
+    scdsLibs "com.siemens.soarian.install:massdeploy:01.01.+"
+    scdsZips "com.siemens.soarian.install:Scripts:01.01.+"
+    claimZips "com.siemens.soarian.pr:ClaimsStrategy:CLAIM_05.05.1111_C45@zip"
+    claimEars "com.siemens.soarian.pr:ClaimsStrategyEar:CLAIM_05.05.1111_C45@ear"
+    claimsArtifacts "com.siemens.soarian.sf.claims:${claimsArtifactId}:$claimsLabelVersion@zip"
+    claimsUpliftArtifacts "com.siemens.soarian.sf.claims:${claimsUpliftArtifactId}:CLAIM_05.05.+@zip"
+	
+}
+
+artifactoryPublishPassword = new PasswordEncryption().decrypt(artifactoryPublishPassword)
+apply plugin:'base'
+apply plugin:'maven-publish'
+
+
+ext.snapshotName = project.hasProperty('snapshotName') ? snapshotName : "${label}-${System.currentTimeMillis()}"
+ext.compileSnapshot=System.getenv('SNAPSHOTNAME')
+if(!compileSnapshot){
+	compileSnapshot=SRNPRbuildLabel;
+	//println "###################################"
+}
+
+buildLabel = System.properties['buildLabel'] ?: label
+ext.srnprLabel=buildLabel.replace('SC4PR','SRNPR')
+
+allprojects{
+    buildDir=new File(rootProject.projectDir, 'GradleOutput')
+    File ruleOutput="${buildDir}/RULES_OUTPUT" as File
+    File LogsDir="${buildDir}/Logs" as File
+    clean.execute()
+    if (!buildDir.exists()) {
+        buildDir=new File(rootProject.projectDir, 'GradleOutput')
+        ruleOutput.mkdirs()
+        LogsDir.mkdirs()
+    }
+}
+
+apply from:"dependencies.gradle"
+
+
+
+['CustomRules','CustomRulesADA2006','CustomRulesADA2012','CustomRules1500R12','srnprCustomRules'].each {
+    tasks.create(name: it, type: Zip) {
+        baseName = it.name
+        extension = "zip"
+        if(it.name=='CustomRules'){
+            with CustomRules
+            with crdtVersion
+        }
+        if(it.name=='CustomRulesADA2006'){
+            with CustomRulesADA2006
+        }
+        if(it.name=='CustomRulesADA2012'){
+            with CustomRulesADA2012
+        }
+        if(it.name=='CustomRules1500R12'){
+            with CustomRules1500R12
+        }
+        if(it.name=='srnprCustomRules'){
+            baseName = it.name.replace('srnpr','')
+            with CustomRules
+        }
+    }
+}
+
+apply from: "generateBinaries.gradle"
+
+
+task createSRNPRPackage(type: Zip,dependsOn:'binariesHelper' ) {
+    baseName = srnprLabel
+    extension = "zip"
+    into("bin"){
+        with srnprRules
+    }
+    into("Rules"){
+		with CustomRulesOutput
+		with adbCollections
+        with rulesVersion
+    }
+    into("CustomRules"){
+        with onlyXmlFiles
+        from project.tasks.srnprCustomRules
+    }
+    into("CustomRulesADA2006"){
+        from project.tasks.CustomRulesADA2006
+    }
+    into("CustomRulesADA2012"){
+        from project.tasks.CustomRulesADA2012
+    }
+    into("CustomRules1500R12"){
+        from project.tasks.CustomRules1500R12
+    }
+}
+
+task createPayerRulesMedias(type:Zip) {
+    baseName = "PayerRules-${buildLabel.replace('SRNPR_','')}"
+    extension = "zip"
+    destinationDir = "${buildDir}/PayerRulesMedias" as File
+    from project.tasks.createSRNPRPackage
+    with groovySqlFiles
+    with scdsFiles
+}
+
+task copyRulesOutputToTempLoc(dependsOn:createPayerRulesMedias,type:Copy){
+	from ("${buildDir}/RULES_OUTPUT")
+	into "$rootDir/tempRULES_OUTPUT"
+	with adbCollections
+    with rulesVersion
+}
+
+if(project.streamType.toString().equalsIgnoreCase('WIP')){
+	project.task('build',dependsOn:'copyRulesOutputToTempLoc')
+} else {
+	project.task('build',dependsOn:'createPayerRulesMedias')
+}
+
+
+
+task createJar(dependsOn:'binariesHelper',type:Jar)  {
+	
+	into("com/cerner/soarian/sf/srnpr"){
+		with adbCollections74
+	}
+		
+	manifest {
+	attributes(
+            'Rules-Version': project.label,
+            'Blaze-Version': project.blazeVersion,
+            'Java-Version' : '1.8'  //Please put right java version according to java-version get changed
+        )
+    }
+	baseName = srnprLabel
+}
+
+
+
+
+
+
+//**************************** For Fitnesse SuiteRun Start******************************* //
+
+task deleteTempRulesOutputWip(type: Delete) {
+    delete "$rootDir/tempRULES_OUTPUT"
+}
+task copyAdvFilesForFitnesseForWip(type:Copy) {
+    from ("${rootDir}/Dev/PR/PRWeb/WebContent"){
+        include '*.xml'
+    }
+	from "$rootDir/tempRULES_OUTPUT"
+    into ("${buildDir}/RULES_OUTPUT")
+}
+if (project.fitRun.equalsIgnoreCase("true")) {
+task rulesFromArtifactory(type: Copy) {
+	into ("${buildDir}/RULES_OUTPUT")
+	configurations{
+        rulesArtifact
+    }
+    dependencies {
+       rulesArtifact "com.siemens.soarian.sf.srnpr:PayerRules_Media:${compileSnapshot}"
+    }
+	from(zipTree((zipTree(project.configurations.rulesArtifact.singleFile).matching{ include '**/*.zip'})[0])){
+		include 'Rules/*'
+	}
+}
+
+
+task deleteRulesStuff(type: Delete) {
+    delete "${buildDir}/RULES_OUTPUT/Rules"
+}
+
+task copyAdvFilesForFitnesseForDev(dependsOn:rulesFromArtifactory,type:Copy) {
+    from ("${rootDir}/Dev/PR/PRWeb/WebContent"){
+        include '*.xml'
+    }
+    into ("${buildDir}/RULES_OUTPUT")
+    from ("${buildDir}/RULES_OUTPUT/Rules")
+	doLast {
+		deleteRulesStuff.execute()
+	}
+}
+
+copyAdvFilesForFitnesseForDev.outputs.upToDateWhen { false }
+
+
+apply plugin:'java'
+	
+
+	project.ext.claimsArtifacts=''
+	if(claimsOldRelease){
+		claimsArtifacts=zipTree((zipTree(project.configurations.claimsArtifacts.singleFile).matching{ include '**/*.zip'})[0]).matching{ include '**/*.ear'}
+		claimsArtifacts=zipTree(claimsArtifacts.collect{it as File}[0]).matching{ include '**/*.jar'}
+	} else {
+		//claimsArtifacts= zipTree(project.configurations.claimsArtifacts.singleFile).matching{ include '**/*.jar' }
+		claimsArtifacts= zipTree(project.configurations.claimsArtifacts.singleFile).matching{ 
+		include '**/AdvCommon-*.jar',
+		   '**/Advisor-*.jar',
+		   '**/AdvisorSvr-*.jar',
+		   '**/AdvTest-*.jar',
+		   '**/blazelicense-*.jar',
+		   '**/castor-core-*.jar',
+		   '**/castor-xml-*.jar',
+		   '**/ClaimService-*.jar',
+		   '**/ClaimContract-*.jar',
+		   '**/ClaimInputContract-*.jar',
+		   '**/ClaimOutputContract-*.jar',
+		   '**/Claims-rpc-*.jar',
+		   '**/ClaimsManagementContract-*.jar',
+		   '**/ClaimsManagementService-*.jar',
+		   '**/ClaimsStrategyService-*.jar',
+		   '**/ClaimUtil-*.jar',
+		   '**/CSA-*.jar',
+		   '**/dmcom-*.jar',
+		   '**/InnovatorRT-*.jar',
+		   '**/jaxb-core-*.jar',
+		   '**/jaxb-impl-*.jar',
+		   '**/log4j-*.jar',
+		   '**/XMLTransformationContract-*.jar',
+		   '**/XMLTransformationService-*.jar',
+		   '**/commons-logging-*.jar'
+		 
+		   
+          }
+	}
+	//println "################################################"
+	//println claimsArtifacts.each {println it}
+	//println "###############################################"
+	sourceSets {
+		fixtureCompile {
+			java {
+				srcDir 'Dev/PR/Testing/ClaimsStrategyFixtures'
+			}
+		}
+	}
+
+	//sourceSets.fixtureCompile.compileClasspath += fileTree(dir: '../TNT_ARCH/ThirdPartyProducts/FICO/Blaze_Advisor_6.9', include: '**/*.jar')
+	//sourceSets.fixtureCompile.compileClasspath += fileTree(dir: '../TNT_ARCH/ThirdPartyProducts/J2EE', include: '**/*.jar')
+	sourceSets.fixtureCompile.compileClasspath += fileTree(dir: 'Dev/PR/Testing/CSFitnesse/fitnesse', include: '**/fitnesse-standalone.jar')
+	sourceSets.fixtureCompile.compileClasspath += fileTree(dir: "${claimsArtifacts[1].getParentFile().toString()}", include: '**/*.jar')
+	sourceSets.fixtureCompile.compileClasspath += fileTree(dir: "Dev/PR/Testing/ClaimsStrategyFixtures/lib", include: '**/*.jar')
+
+	//sourceSets.fixtureCompile.compileClasspath.each{println it}
+
+	task fixtureCompileJar (type: Jar) {
+		from sourceSets.fixtureCompile.output
+		baseName 'fitnesse_CS'
+	}
+
+	ext.fixtureArtifacts=''
+	ext.fitSuiteDependencies=[]
+	def m=(project.configurations.claimsArtifacts.singleFile=~/(\w{5}_\d{2}.\d{2}.\d{4}[_]*[C]*[\d{2,3}]{0,2}[_]*[H]*[\d{2,3}]{0,2})/)
+	def fixtureBuildNumber=m*.first().first()
+	println "###########################################"
+	println fixtureBuildNumber
+	println "###########################################"
+
+	def cBuild=(m*.first().first()=~/\w{5}_\d{2}.\d{2}.(\d{4})[_]*[C]*[\d{2,3}]{0,2}[_]*[H]*[\d{2,3}]{0,2}/)*.get(1).first()
+
+	if(cBuild.toInteger()>=1463){
+		configurations{
+			fixtureCompile
+		}
+		dependencies {
+			fixtureCompile "com.siemens.soarian.sf.claims:ClaimsStrategyFixtures:$fixtureBuildNumber@jar"
+		}
+		 fixtureArtifacts=project.configurations.fixtureCompile.singleFile.getParentFile() as File
+		if(project.streamType.toString().equalsIgnoreCase('DEV')){
+			fitSuiteDependencies=[copyAdvFilesForFitnesseForDev]
+		} else {
+			fitSuiteDependencies=[copyAdvFilesForFitnesseForWip,deleteTempRulesOutputWip]
+		}
+		
+		project.sourceSets.fixtureCompile.compileClasspath +=files(project.configurations.fixtureCompile.singleFile)
+		
+		
+	} else {
+		fixtureArtifacts="${buildDir}\\libs"
+		if(project.streamType.toString().equalsIgnoreCase('DEV')){
+			fitSuiteDependencies=[copyAdvFilesForFitnesseForDev,fixtureCompileJar]
+		} else {
+			fitSuiteDependencies=[copyAdvFilesForFitnesseForWip,fixtureCompileJar]
+		}
+		project.sourceSets.fixtureCompile.compileClasspath +=files(project.fixtureCompileJar.archivePath)+files(sourceSets.fixtureCompile.output.classesDir)
+	}
+
+	ext.environmentVars = [
+			"fit.sfclaim.build.output": claimsArtifacts[1].getParentFile().toString(),
+			"fixture.path":fixtureArtifacts.toString(),
+			"fit.standalone.jar.path":"${rootDir}\\Dev\\PR\\Testing\\CSFitnesse\\fitnesse",
+			//"fit.thirdparty.jar.loc":"${rootDir}\\..\\TNT_ARCH\\ThirdPartyProducts\\J2EE",
+			"fit.rules.ouput":"${buildDir}\\RULES_OUTPUT\\BRETest_Compiled.server.xml",
+			"fit.ecv.sql.jar.path":"${rootDir}\\Dev\\PR\\Testing\\ClaimsStrategyFixtures\\lib"
+	]		
+
+	//environmentVars.each{println it}
+
+	task fitSuiteRun(dependsOn:fitSuiteDependencies) {
+
+		doLast {
+		
+	
+		
+			new File("${buildDir}/reports/fitnesse").mkdirs()
+
+			ExecResult result = project.javaexec {
+				environmentVars.each { String key, String value ->
+					environment key, value
+				}
+				workingDir = 'Dev/PR/Testing/CSFitnesse/fitnesse'
+				errorOutput = new BufferedOutputStream(new FileOutputStream(new File("$buildDir/reports/fitnesse/fitnesseErrorLogging.log")))
+				standardOutput = new BufferedOutputStream(new FileOutputStream(new File("$buildDir/reports/fitnesse/fitnesseOutputLog.text")))
+				main = "fit.runner.FitnesseRunner"
+				println "Now Executing Fitnesse Standalone Jar"
+				classpath = sourceSets.fixtureCompile.compileClasspath
+				ignoreExitValue = true
+				args "${rootDir.absolutePath}\\Dev\\PR\\Testing\\CSFitnesse\\fitnesse"
+				args suitename
+				args heapsize
+				args '-verbose'
+				args "-p${port}"
+				args fixtureBuildNumber
+				args buildLabel
+				
+			}
+
+
+			if (result.exitValue != 0) {
+				throw new GradleException("Fitnesse Test Suite Failed in this suite: $suitename. \nPlease find Test Reports at:\nPlease find the failure at errorLog")
+			}
+
+		}
+	}
+    task fitSuiteRunValidation << {
+        File file = file("${rootDir}/Dev/PR/Testing/CSFitnesse/fitnesse/results/jenkinsOutput.properties")
+        def ignored=false
+        def wrong=false
+        file.readLines().each{
+            if(it=~/ignored=0/){
+                ignored=true
+            }
+            if(it=~/wrong=0/){
+                wrong=true
+            }
+        }
+        if(ignored && wrong){
+            println "ignored=0"
+            println "wrong=0"
+            println "Successfully executed the fitSuiteRun with zero error count!!"
+        } else {
+            throw new GradleException("######################### \nThere are accountable errors.\n#########################\n ${file.text}");
+        }
+    }
+	
+	
+	
+	
+	task writeToFile << {
+
+		if(project.isForEcvDataGeneration.toString().equalsIgnoreCase('YES')){
+			def propertyFile = file("$projectDir/Dev/PR/Testing/CSFitnesse/fitnesse/CS.properties") 
+			def props = new Properties()
+			props.load(propertyFile.newDataInputStream())
+			props.setProperty('From_ECV', 'true')
+			props.store(propertyFile.newWriter(), null)
+			}
+	}
+}
+
+//*************************************Fitnesse SuiteRun End**********************************//
+
+
+
+publishing {
+    publications {
+        mavenMedia(MavenPublication) {
+            artifactId 'PayerRules_Media'
+            version snapshotName
+            artifact createPayerRulesMedias
+        }
+    }
+    publications {
+        adbCollections(MavenPublication) {
+			groupId 'com.cerner.sf.srnpr'
+			artifactId "model_payer_rules_blaze_${project.blazeVersion}_java_1.8"  //Please put right java version according to java-version get changed
+            version project.label
+            artifact createJar
+        }
+    }
+    repositories project.artifactoryRepositories
+}
+
+task publishAdbCollections (dependsOn: ['publishAdbCollectionsPublicationToReleaseRepository'])
+
+task publishSnapshot(dependsOn: ['publishMavenMediaPublicationToSnapshotRepository'])  {
+    doLast{
+        // deleteExtras.execute()
+    }
+}
+
+configurations{
+    snapshotMedia
+}
+
+dependencies{
+    snapshotMedia "${group}:PayerRules_Media:${snapshotName}"
+}
+
+publishing {
+    publications {
+        releaseMedia(MavenPublication) {
+            artifactId 'PayerRules_Media'
+            version label
+        }
+    }
+    repositories project.artifactoryRepositories
+}
+task configureReleaseMedia << {
+    publishing.publications.releaseMedia { artifact configurations.snapshotMedia.singleFile }
+}
+task publishRelease (dependsOn: ['configureReleaseMedia','publishReleaseMediaPublicationToReleaseRepository']) {
+    doLast{
+        // deleteExtras.execute()
+    }
+}
+
+apply plugin: AccurevPlugin
+
+tagSource {
+    basisStream = project.accurevBasisStream
+    label = project.label
+    environment = "PROD"
+    outputs.upToDateWhen { false }
+    snapshotName = project.snapshotName
+}
+
+deprecateSnapshots {
+    snapshotId = project.snapshotName
+    basisStream = project.accurevBasisStream
+    depot = "SF"
+    environment = "PROD"
+    snapshotName = project.snapshotName
+}
+
+gradle.addBuildListener(new SnapshotListener())

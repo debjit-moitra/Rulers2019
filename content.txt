@@ -1,0 +1,21 @@
+Test Suite for testing Claims
+
+
+# Uses precompiled rules
+!define RULES_LOCATION {${fit.rules.ouput}}
+!define RULES_CHS_LOCATION {${fit.rules.CHS.ouput}}
+
+'''  Define variable '''
+!define CLM_BUILD_OUTPUT {${fit.sfclaim.build.output}}
+!define ECV_JAR_LOCATION {${fit.ecv.sql.jar.path}}
+
+# Uses the rules monitor to create trace files
+#!define RULES_DEBUG_LOCATION {..\..\..\PRWeb\WebContent\BRETest_Compiled_Debug.server.xml}
+
+
+'''Set up CS Classpath'''
+
+!path ${CLM_BUILD_OUTPUT}\*.jar
+!path ${ECV_JAR_LOCATION}\sqljdbc4.jar
+
+!contents
